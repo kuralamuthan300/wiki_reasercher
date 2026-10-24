@@ -1,0 +1,42 @@
+services:
+  neo4j:
+    image: neo4j:latest
+    container_name: neo4j-container
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/your_secure_password
+    volumes:
+      - /Users/kural/Docker/neo4j:/data
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow
+    restart: unless-stopped
+    ports:
+      - "5001:5000"
+    environment:
+      # Keeps stored gateway API keys decryptable across container recreations
+      - MLFLOW_CRYPTO_KEK_PASSPHRASE=change_me_to_a_long_random_string
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /Users/kural/Docker/mlflow:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root mlflow-artifacts:/
+      --host 0.0.0.0
+      --port 5000
+
+  redis-tutorial:
+    image: redis:latest
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass your_secure_password
+    volumes:
+      - /Users/kural/Docker/redis:/data
