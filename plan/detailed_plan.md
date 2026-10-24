@@ -261,7 +261,7 @@ wiki_reasercher/
 ### Step 29: Research graph
 - **Goal:** Run the question-answering workflow.
 - **Files:** `app/graphs/research.py`
-- **Notes:** State: `question`, `request_type`, `document_refs`, `chapter_refs`, `sub_queries`, `evidence`, `analysis`, `verification`, `retries`, `report_path`. Nodes: `intent_classifier` (seven request types from master plan section 4), `planner`, `resolve_docs` (also resolves chapter ranges through the catalog), `decompose`, `vector_retrieve`, `graph_retrieve`, `fuse`, `analyze`, `verify`, `reporter`. Chapter comparison routes to `compare.py` instead of plain vector and graph retrieval. After `verify`, retry through `decompose` while `retries < MAX_RETRIES` and the verifier says evidence is insufficient.
+- **Notes:** State: `question`, `request_type`, `document_refs`, `chapter_refs`, `sub_queries`, `evidence`, `analysis`, `verification`, `retries`, `report_path`. Nodes: `intent_classifier` (seven request types from master plan section 4), `planner`, `resolve_docs` (also resolves chapter ranges through the catalog), `decompose`, `vector_retrieve`, `graph_retrieve`, `fuse`, `analyze`, `verify`, `reporter`. Chapter comparison routes to `compare.py` instead of plain vector and graph retrieval. After `verify`, retry through `decompose` while `retries < MAX_RETRIES` and the verifier says evidence is insufficient. Routing: `simple` goes to `vector_retrieve`, `relational` goes to `graph_retrieve` then `vector_retrieve`, `compare` goes to `compare.py`, and an unclear label falls back to `simple`. Explicit cues ("compare", "chapter N of", "difference between") are checked by rules before the LLM classifier.
 - **Verify:** A fake LLM run walks the full path and ends at `reporter`.
 
 ### Step 30: Analysis
@@ -335,7 +335,7 @@ wiki_reasercher/
 ### Step 41: Run logging
 - **Goal:** Record each research run.
 - **Files:** `app/observability.py`, `app/graphs/research.py`
-- **Notes:** Params: `chunk_size`, `chunk_overlap`, `top_k`, `embedding_model`, `llm_model`, `PROMPT_VERSION`, `strategy`, `docling_version`. Metrics: vector and graph result counts, cache hits and misses, retries, duration. Artifact: the report file.
+- **Notes:** Params: `chunk_size`, `chunk_overlap`, `top_k`, `embedding_model`, `llm_model`, `PROMPT_VERSION`, `strategy`, `docling_version`. Metrics: vector and graph result counts, cache hits and misses, retries, duration, and duration per retrieval path (vector, graph, compare). Artifact: the report file.
 - **Verify:** One run appears in the MLflow UI with params, metrics, and the report artifact.
 
 ### Step 42: Evaluation dataset

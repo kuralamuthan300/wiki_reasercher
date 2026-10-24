@@ -147,6 +147,17 @@ flowchart TD
     N --> O["Save Markdown report"]
 ```
 
+### Query routing
+
+The intent classifier routes each question to one retrieval path:
+
+- **Simple factual question:** vector retrieval only.
+- **Relationship question** (dependencies, links between topics): graph retrieval, then vector retrieval for the connected chunks.
+- **Comparison or contradiction across chapters or documents:** the recursive chapter comparison in `compare.py`.
+- **Unclear:** vector retrieval, the safe default.
+
+Rules run first for explicit cues (for example "compare", "chapter N of", "difference between"). An LLM classifier handles the remaining questions and returns one label.
+
 ### Retrieval requirements
 
 **Vector retrieval**
@@ -285,10 +296,11 @@ Use MLflow as the only dedicated observability and evaluation platform.
 
 Instrument the major stages of a research run:
 
-- Intent classification.
+- Intent classification and the selected route.
 - Planning and query decomposition.
-- ChromaDB retrieval.
-- Neo4j retrieval.
+- ChromaDB retrieval, timed separately.
+- Neo4j retrieval, timed separately.
+- Chapter comparison, timed separately.
 - Redis cache lookups.
 - Analysis and evidence verification.
 - Markdown report generation.
