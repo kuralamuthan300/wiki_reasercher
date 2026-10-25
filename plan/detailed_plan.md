@@ -5,8 +5,8 @@ Work through the steps in order. Finish each step's **Verify** check before star
 ## Assumptions and defaults
 
 - Python 3.14 (matches `.python-version`). If a dependency has no 3.14 wheel, lower `requires-python` and `.python-version` to 3.13 and record the change in this file.
-- LLM: OpenAI-compatible chat model through `langchain-openai`, configured by `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`. Works with OpenAI or local Ollama (`http://localhost:11434/v1`).
-- Embeddings: local `sentence-transformers` model set by `EMBEDDING_MODEL` (default `all-MiniLM-L6-v2`). Free and offline.
+- LLM: MLflow AI Gateway chat endpoint through `langchain-openai`, configured by `LLM_BASE_URL` (gateway base URL), `LLM_API_KEY`, and `LLM_MODEL` (endpoint name, default `nemotron-3-ultra`; alternative `nemotron-super`). `deepseek-v4.1-flash` is listed by the gateway, but its backing model is unverified. Do not use it until the gateway configuration is confirmed and tested.
+- Embeddings: local `sentence-transformers` model set by `EMBEDDING_MODEL` (default `all-MiniLM-L6-v2`). Free and offline. Gateway alternative `open-ai-embedding` (`text-embedding-3-small`, 1536 dimensions) requires re-embedding all chunks. Each embedding model writes to its own Chroma collection (Step 18), so switching models does not overwrite existing vectors.
 - Docling does all extraction (web and PDF). OCR is off by default.
 - Storage: Chroma persistent client on disk, Neo4j, Redis, MLflow via Docker Compose.
 - SQLite (`data/catalog.sqlite`) is a local catalog for document, section, and chunk metadata only. No database stores research findings.
@@ -45,7 +45,8 @@ wiki_reasercher/
 │   ├── intermediate/
 │   ├── cleaned/
 │   ├── chroma/
-│   └── catalog.sqlite
+│   ├── catalog.sqlite
+│   └── corpus_version.json
 ├── reports/
 ├── evaluations/
 │   ├── dataset.json
@@ -84,8 +85,8 @@ wiki_reasercher/
 ### Step 4: Environment template
 - **Goal:** Document all settings.
 - **Files:** `.env.example`
-- **Notes:** Keys: `NEO4J_URI=bolt://localhost:7687`, `NEO4J_USER=neo4j`, `NEO4J_PASSWORD`, `REDIS_URL=redis://:PASSWORD@localhost:6379/0`, `MLFLOW_TRACKING_URI=http://localhost:5001`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDING_MODEL=all-MiniLM-L6-v2`, `DATA_DIR=./data`, `CATALOG_PATH=./data/catalog.sqlite`, `CHROMA_PATH=./data/chroma`, `REPORTS_DIR=./reports`, `CACHE_TTL_SECONDS=600`, `MAX_RETRIES=2`, `CHUNK_SIZE=1200`, `CHUNK_OVERLAP=150`, `TOP_K=5`, `DOCLING_OCR=false`, `REMOVE_REFERENCES=true`.
-- **Verify:** Copy to `.env` locally and confirm the file loads in Step 6. Done: `.env` created from the template. `CATALOG_PATH` was appended to `.env` and still needs to be added to `.env.example`. Passwords and `LLM_API_KEY` are still placeholders.
+- **Notes:** Keys: `NEO4J_URI=bolt://localhost:7687`, `NEO4J_USER=neo4j`, `NEO4J_PASSWORD`, `REDIS_URL=redis://:PASSWORD@localhost:6379/0`, `MLFLOW_TRACKING_URI=http://localhost:5001`, `LLM_BASE_URL` (MLflow AI Gateway URL), `LLM_API_KEY`, `LLM_MODEL=nemotron-3-ultra` (gateway endpoint name), `EMBEDDING_MODEL=all-MiniLM-L6-v2`, `DATA_DIR=./data`, `CATALOG_PATH=./data/catalog.sqlite`, `CHROMA_PATH=./data/chroma`, `REPORTS_DIR=./reports`, `CACHE_TTL_SECONDS=600`, `MAX_RETRIES=2`, `CHUNK_SIZE=1200`, `CHUNK_OVERLAP=150`, `TOP_K=5`, `DOCLING_OCR=false`, `REMOVE_REFERENCES=true`.
+- **Verify:** Copy to `.env` locally and confirm the file loads in Step 6. Status: `.env` exists and includes `CATALOG_PATH`. `.env.example` does not exist yet and must be created from the keys above, including `CATALOG_PATH`. Passwords and `LLM_API_KEY` in `.env` are still placeholders.
 
 ### Step 5: Service health checks
 - **Goal:** Confirm the containers work from the host.
@@ -134,14 +135,14 @@ wiki_reasercher/
 ### Step 11: Intermediate store
 - **Goal:** Save raw Markdown and metadata under `data/intermediate/`.
 - **Files:** `app/ingestion/intermediate.py`
-- **Notes:** Write `{doc_id}.md` and `{doc_id}.json` with `title`, `source_url`, `source_type` (`web` or `pdf`), `is_wikipedia`, `content_sha256`, `converted_at`, `docling_version`. Write atomically (temp file, then rename).
+- **Notes:** Write `{doc_id}.md` and `{doc_id}.json` with `title`, `source_url`, `source_type` (`web` or `pdf`), `is_wikipedia`, `source_sha256` (hash of the fetched source bytes), `content_sha256` (hash of the extracted Markdown), `converted_at`, `docling_version`. Write atomically (temp file, then rename).
 - **Verify:** The files exist with valid JSON after converting a fixture.
 
 ### Step 12: Skip unchanged conversions
 - **Goal:** Avoid re-running Docling on identical content.
 - **Files:** `app/ingestion/intermediate.py`, `app/ingestion/validate.py`
-- **Notes:** If `{doc_id}.md` exists and `--force` is not set, reuse it. Compare `content_sha256` against a fresh hash only when the source is re-fetched. Return a flag saying whether the content changed. Changed content is the trigger for bumping the corpus version.
-- **Verify:** A second run without `--force` reports "skipped" and makes no Docling call (check with a mock).
+- **Notes:** Every ingest fetches the source bytes and computes `source_sha256`. If `{doc_id}.json` exists, its `source_sha256` matches, and `--force` is not set, skip Docling and return status `skipped`. Otherwise run Docling, write the new `.md` and `.json`, and compare the new `content_sha256` with the previous value. Return a `content_changed` flag, which is true only when `content_sha256` differs. `content_changed` is the trigger for bumping the corpus version (Step 37). A source change that produces identical Markdown does not bump the version.
+- **Verify:** A second run without `--force` reports "skipped" and makes no Docling call (check with a mock). A run after the source bytes change reconverts and sets `content_changed` only if the Markdown actually changed.
 
 ### Step 13: Phase 2 checkpoint
 - **Verify:** Ingest one Wikipedia URL and one PDF URL. Check that both `.md` files have headings. The PDF file has page markers. The second run skips conversion.
@@ -178,7 +179,7 @@ wiki_reasercher/
 ### Step 18: Chroma upsert
 - **Goal:** Store chunk embeddings idempotently.
 - **Files:** `app/retrieval/vector.py`
-- **Notes:** `chromadb.PersistentClient(path=CHROMA_PATH)`. Collection `research_chunks` with cosine distance. Before upserting, delete all records where `document_id` equals the current document ID. Then `upsert` with `ids=chunk_id`, embeddings from Step 7, and metadata from Step 16.
+- **Notes:** `chromadb.PersistentClient(path=CHROMA_PATH)`. Collection `research_chunks_<slug>` with cosine distance, where `slug` is `EMBEDDING_MODEL` with every non-alphanumeric character replaced by `_` (for example `research_chunks_all_MiniLM_L6_v2`). Chroma collection names must be 3–63 characters of letters, digits, underscores, or hyphens. Each embedding model gets its own collection, so switching models never mixes vector dimensions. Before upserting, delete all records where `document_id` equals the current document ID. Then `upsert` with `ids=chunk_id`, embeddings from Step 7, and metadata from Step 16.
 - **Verify:** Ingesting the same document twice leaves the collection count unchanged.
 
 ### Step 19: Chroma search
@@ -209,8 +210,8 @@ wiki_reasercher/
 ### Step 23: Graph writer
 - **Goal:** Write the graph with provenance, without LLM-generated Cypher.
 - **Files:** `app/retrieval/graph.py`
-- **Notes:** Use fixed, parameterized `MERGE` statements. Create `Document`, `Section`, and `Chunk` nodes, `HAS_SECTION` (Document to Section), `HAS_SUBSECTION` (Section to Section), `IN_SECTION` (Chunk to Section), `CONTAINS`, `DISCUSSES` (Chunk to Topic), `MENTIONS` (Chunk to Entity), `EVIDENCED_BY` (Claim to Chunk), `SUPPORTS` and `RELATED_TO` between entities, and `Methodology` nodes linked by `DISCUSSES`. Before writing, delete the document's `Chunk` nodes and their `EVIDENCED_BY` edges. Then write fresh data.
-- **Verify:** Re-ingesting one document leaves node counts for that document unchanged.
+- **Notes:** Use fixed, parameterized `MERGE` statements. Create `Document`, `Section`, and `Chunk` nodes, `HAS_SECTION` (Document to Section), `HAS_SUBSECTION` (Section to Section), `IN_SECTION` (Chunk to Section), `CONTAINS`, `DISCUSSES` (Chunk to Topic), `MENTIONS` (Chunk to Entity), `EVIDENCED_BY` (Claim to Chunk), `SUPPORTS`, `CONTRADICTS`, and `RELATED_TO` between entities, and `Methodology` nodes linked by `DISCUSSES`. Claim IDs are `sha256(document_id + chunk_id + normalized_text)[:16]`. Before writing, delete the document's `Chunk` nodes with `DETACH DELETE`, and delete the `Claim` nodes whose `EVIDENCED_BY` edges point to those chunks. Then write fresh data. `Document` and `Section` nodes are keyed by deterministic IDs, so `MERGE` updates them in place. `Entity`, `Topic`, and `Methodology` nodes are shared across documents, so they are never deleted on re-ingest. Orphaned shared nodes are harmless.
+- **Verify:** Re-ingesting one document leaves node counts for that document unchanged, including `Claim` counts.
 
 ### Step 24: Graph retrieval
 - **Goal:** Return graph evidence through fixed query templates.
@@ -261,7 +262,7 @@ wiki_reasercher/
 ### Step 29: Research graph
 - **Goal:** Run the question-answering workflow.
 - **Files:** `app/graphs/research.py`
-- **Notes:** State: `question`, `request_type`, `document_refs`, `chapter_refs`, `sub_queries`, `evidence`, `analysis`, `verification`, `retries`, `report_path`. Nodes: `intent_classifier` (seven request types from master plan section 4), `planner`, `resolve_docs` (also resolves chapter ranges through the catalog), `decompose`, `vector_retrieve`, `graph_retrieve`, `fuse`, `analyze`, `verify`, `reporter`. Chapter comparison routes to `compare.py` instead of plain vector and graph retrieval. After `verify`, retry through `decompose` while `retries < MAX_RETRIES` and the verifier says evidence is insufficient. Routing: `simple` goes to `vector_retrieve`, `relational` goes to `graph_retrieve` then `vector_retrieve`, `compare` goes to `compare.py`, and an unclear label falls back to `simple`. Explicit cues ("compare", "chapter N of", "difference between") are checked by rules before the LLM classifier.
+- **Notes:** State: `question`, `request_type`, `document_refs`, `chapter_refs`, `sub_queries`, `evidence`, `analysis`, `verification`, `retries`, `report_path`. Nodes: `intent_classifier` (seven request types from master plan section 4), `planner`, `resolve_docs` (also resolves chapter ranges through the catalog), `decompose`, `vector_retrieve`, `graph_retrieve`, `fuse`, `analyze`, `verify`, `reporter`. Chapter comparison routes to `compare.py` instead of plain vector and graph retrieval. After `verify`, retry through `decompose` while `retries < MAX_RETRIES` and the verifier says evidence is insufficient. Routing: `simple` goes to `vector_retrieve`, `relational` goes to `graph_retrieve` then `vector_retrieve`, `compare` goes to `compare.py`, and `ingest` goes to the ingestion graph (Step 28). An unclear label falls back to `simple`. Request-type mapping: single-document Q&A → `simple`; multi-document synthesis, methodology alignment, and contradiction analysis → `relational`; cross-document comparison and chapter comparison → `compare`; ingest a document → `ingest`. This mapping matches the routing table in master plan section 6. Explicit cues ("compare", "chapter N of", "difference between", "ingest") are checked by rules before the LLM classifier.
 - **Verify:** A fake LLM run walks the full path and ends at `reporter`.
 
 ### Step 30: Analysis
@@ -410,4 +411,4 @@ wiki_reasercher/
 7. Each research run produces a Markdown report with citations.
 8. MLflow records traces and evaluation runs.
 9. The project runs locally with the README steps.
-10. SQLite is the only local relational store, used only for the catalog. No other database or observability service is required.
+10. SQLite is used only as the local catalog (Steps 25A–25B). No other relational database or observability service is required.

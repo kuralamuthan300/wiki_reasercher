@@ -20,14 +20,29 @@ The agent must:
 
 **No PostgreSQL. No OpenTelemetry, Grafana, or Prometheus. No database writes for research findings. SQLite is used only as a local catalog of document, section, and chunk metadata.**
 
+### Models (MLflow AI Gateway)
+
+All models are called through the MLflow AI Gateway. The application uses endpoint names, not provider model names.
+
+| Endpoint | Provider | Backing model | Strategy |
+|---|---|---|---|
+| `nemotron-3-ultra` | ollama + openrouter | `nemotron-3-ultra` (ollama), `nvidia/nemotron-3-ultra-550b-a55b:free` (openrouter) | 0.5 / 0.5, `REQUEST_BASED_TRAFFIC_SPLIT` |
+| `nemotron-super` | ollama | `nemotron-3-super:cloud` | 1.0 |
+| `deepseek-v4.1-flash` | not verified (listed by gateway, no config details exposed) | not verified | not verified |
+| `open-ai-embedding` | openai | `text-embedding-3-small` | 1.0 |
+
+`nemotron-3-ultra` is the default chat endpoint. `nemotron-super` is an alternative chat endpoint. `deepseek-v4.1-flash` is not yet usable (see below). `open-ai-embedding` is optional; it produces 1536-dimensional vectors, so switching from the local model requires re-embedding all chunks. Each embedding model writes to its own Chroma collection (`research_chunks_<model slug>`), so switching does not overwrite existing vectors.
+
+`deepseek-v4.1-flash` is listed by the gateway, but its backing model is unverified. Do not use it until the gateway configuration is confirmed and tested.
+
 ## 2. Technology stack
 
 | Component | Technology | Purpose |
 |---|---|---|
 | Language | Python | Application logic |
 | Orchestration | LangGraph | Research workflow |
-| LLM | One configurable LLM provider | Planning, analysis, graph extraction, reporting |
-| Embeddings | One embedding model | Chunk embeddings |
+| LLM | MLflow AI Gateway chat endpoint | Planning, analysis, graph extraction, reporting |
+| Embeddings | Local sentence-transformers model (default) | Chunk embeddings |
 | Vector DB | ChromaDB | Semantic retrieval |
 | Graph DB | Neo4j | Entity and relationship retrieval |
 | Cache | Redis | Vector and graph retrieval-result caching |
@@ -36,7 +51,7 @@ The agent must:
 | Catalog | SQLite (`data/catalog.sqlite`) | Document, section tree, and chunk-to-section metadata for comparison and re-ingest |
 | Observability/evaluation | MLflow | Traces, experiments, metrics, evaluation results |
 | Testing | pytest | Basic unit and integration tests |
-| Runtime | Local Python + Docker Compose | Run the application and supporting services |
+| Runtime | Python 3.14 (fallback 3.13, see detailed plan Step 1) + Docker Compose | Run the application and supporting services |
 
 Use a simple CLI initially. Add FastAPI or a user interface only if time permits.
 
@@ -104,7 +119,7 @@ Implement the following pipeline:
 1. Validate the supplied URL.
 2. Determine whether it points to a web page or PDF.
 3. Convert the page or PDF to Markdown with Docling.
-4. Save the raw Markdown and metadata to `data/intermediate/`. Skip conversion when the content is unchanged.
+4. Save the raw Markdown and metadata to `data/intermediate/`. Skip conversion when the source bytes match the stored `source_sha256` and the run is not forced (see detailed plan Step 12).
 5. Preserve the title, source URL, headings, and PDF page numbers.
 6. Clean the Markdown (remove boilerplate and citation markers) and split it into manageable chunks.
 7. Attach stable document IDs, section IDs, chapter numbers, chunk IDs, and source metadata. Build the section tree from Docling headings.
@@ -149,14 +164,20 @@ flowchart TD
 
 ### Query routing
 
-The intent classifier routes each question to one retrieval path:
+The intent classifier assigns one of the seven request types from section 4. Each request type maps to one route:
 
-- **Simple factual question:** vector retrieval only.
-- **Relationship question** (dependencies, links between topics): graph retrieval, then vector retrieval for the connected chunks.
-- **Comparison or contradiction across chapters or documents:** the recursive chapter comparison in `compare.py`.
-- **Unclear:** vector retrieval, the safe default.
+| Request type | Route | Retrieval path |
+|---|---|---|
+| Ingest a document | `ingest` | Ingestion workflow, then the question is answered if one was asked |
+| Single-document Q&A | `simple` | Vector retrieval only |
+| Multi-document synthesis | `relational` | Graph retrieval, then vector retrieval for the connected chunks |
+| Methodology alignment | `relational` | Graph retrieval (Methodology nodes), then vector retrieval |
+| Contradiction analysis | `relational` | Graph retrieval (CONTRADICTS edges), then vector retrieval |
+| Cross-document comparison | `compare` | Recursive comparison in `compare.py` |
+| Chapter comparison | `compare` | Recursive comparison in `compare.py` |
 
-Rules run first for explicit cues (for example "compare", "chapter N of", "difference between"). An LLM classifier handles the remaining questions and returns one label.
+- An unclear label falls back to `simple`, the safe default.
+- Rules run first for explicit cues (for example "compare", "chapter N of", "difference between", "ingest"). An LLM classifier handles the remaining questions and returns one request-type label.
 
 ### Retrieval requirements
 
@@ -337,7 +358,7 @@ Keep MLflow local for the initial project. Do not set up additional observabilit
 ## 11. Minimal project structure
 
 ```text
-research-agent/
+wiki_reasercher/
 ├── app/
 │   ├── main.py
 │   ├── config.py
@@ -358,22 +379,29 @@ research-agent/
 │   │   ├── query_decomposition.py
 │   │   └── compare.py
 │   ├── cache/
-│   │   └── redis_cache.py
+│   │   ├── redis_cache.py
+│   │   └── corpus_version.py
+│   ├── graph_extraction.py
+│   ├── catalog.py
 │   ├── analysis.py
-│   └── reporter.py
+│   ├── reporter.py
+│   └── observability.py
 ├── data/
 │   ├── intermediate/
 │   ├── cleaned/
 │   ├── chroma/
-│   └── catalog.sqlite
+│   ├── catalog.sqlite
+│   └── corpus_version.json
 ├── reports/
 ├── evaluations/
 │   ├── dataset.json
 │   └── evaluate.py
 ├── tests/
+│   └── fixtures/
+├── plan/
 ├── docker-compose.yml
-├── pyproject.toml
 ├── .env.example
+├── pyproject.toml
 └── README.md
 ```
 
@@ -429,7 +457,7 @@ The project is complete when:
 7. Completed research requests produce Markdown reports with citations.
 8. MLflow records traces or equivalent stage-level tracking and basic evaluation runs.
 9. The project runs locally with documented setup instructions.
-10. No relational database or unnecessary observability services are required.
+10. No relational database beyond the SQLite catalog, and no unnecessary observability services, are required.
 
 ## Instructions to the coding agent
 
